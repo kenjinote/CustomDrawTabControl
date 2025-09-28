@@ -1,6 +1,7 @@
 ﻿#include <windows.h>
 #include <dwmapi.h>
 #include "CustomTabControl.h"
+#include "resource.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -33,6 +34,24 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             SetWindowPos(g_tabControl.GetHwnd(), NULL, 0, 0, rc.right, 40, SWP_NOZORDER);
         }
         return 0;
+    case WM_COMMAND:
+		if (LOWORD(wParam) == ID_ACCELERATOR40001) { // メニューからタブ追加
+			static int tabIndex = 1;
+			std::wstring title = L"Tab " + std::to_wstring(tabIndex++);
+			g_tabControl.AddTab(title);
+			g_tabControl.SetCurSel(g_tabControl.GetTabCount() - 1);
+		}
+        else if (LOWORD(wParam) == ID_ACCELERATOR40002) { // メニューからタブ選択
+            // タブ削除
+			int curSel = g_tabControl.GetCurSel();
+            if (curSel != -1) {
+                g_tabControl.SetCurSel(max(0, curSel - 1));
+				g_tabControl.RemoveTab(curSel);
+
+
+            }
+        }
+        break;
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -63,9 +82,17 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     UpdateWindow(g_hMainWnd);
 
     MSG msg;
+
+    // アクセラレーター
+	HACCEL hAccel = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDR_ACCELERATOR1));
     while (GetMessage(&msg, NULL, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+		if (!TranslateAccelerator(g_hMainWnd, hAccel, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
     }
+    // アクセラレーター削除
+	DestroyAcceleratorTable(hAccel);
+
     return (int)msg.wParam;
 }

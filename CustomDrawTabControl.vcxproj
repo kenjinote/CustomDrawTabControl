@@ -163,6 +163,10 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="CustomTabControl.h" />
+    <ClInclude Include="resource.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="CustomDrawTabControl.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

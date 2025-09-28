@@ -5,23 +5,24 @@
 #include <algorithm>
 #include <math.h>
 
-#define TAB_CLOSE_BUTTON_WIDTH 24
-#define TAB_CLOSE_BUTTON_HEIGHT 16
 #define TAB_PADDING_X 16
 #define TAB_PADDING_Y 8
 #define TAB_ROUND_RADIUS 8
 #define FONT_SIZE 16
+#define TAB_ANIMATION_TIMER_ID 101
 
 static const WCHAR s_szClassName[] = L"CustomTabControlClass";
+static const WCHAR s_szDragClassName[] = L"CustomTabDragClass";
 static bool s_classRegistered = false;
+static bool s_dragClassRegistered = false;
 
 CustomTabControl::CustomTabControl()
     : m_hWnd(NULL), m_hFont(NULL), m_dpi(96), m_selectedTab(0), m_hoveredTab(-1),
     m_hoveredCloseButtonTab(-1), m_draggedTabIndex(-1), m_isDragging(false),
     m_scrollOffset(0), m_isScrollLeftHovered(false), m_isScrollRightHovered(false),
-    m_totalTabsWidth(0), m_scrollButtonWidth(0), m_scrollButtonHeight(0) {
+    m_totalTabsWidth(0), m_scrollButtonWidth(0), m_scrollButtonHeight(0),
+    m_animationTimerRunning(false), m_hDragWnd(NULL) {
 
-    // デフォルトのタブを追加
     m_tabTitles.push_back(L"Tab 1");
     m_tabTitles.push_back(L"Tab 2");
     m_tabTitles.push_back(L"Tab 3");
@@ -30,7 +31,6 @@ CustomTabControl::CustomTabControl()
     m_tabTitles.push_back(L"Final Tab 6");
     m_tabTitles.push_back(L"Tab 7");
 
-    // ダークモードをデフォルトとする
     m_clrBg = RGB(32, 32, 32);
     m_clrText = RGB(220, 220, 220);
     m_clrActiveTab = RGB(50, 50, 50);
@@ -43,20 +43,33 @@ CustomTabControl::~CustomTabControl() {
     if (m_hFont) {
         DeleteObject(m_hFont);
     }
+    DestroyDragWindow();
 }
 
 void CustomTabControl::RegisterWindowClass(HINSTANCE hInstance) {
-    if (s_classRegistered) return;
+    if (!s_classRegistered) {
+        WNDCLASSEXW wc = { 0 };
+        wc.cbSize = sizeof(WNDCLASSEXW);
+        wc.lpfnWndProc = WndProc;
+        wc.hInstance = hInstance;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = CreateSolidBrush(RGB(32, 32, 32));
+        wc.lpszClassName = s_szClassName;
+        RegisterClassExW(&wc);
+        s_classRegistered = true;
+    }
 
-    WNDCLASSEXW wc = { 0 };
-    wc.cbSize = sizeof(WNDCLASSEXW);
-    wc.lpfnWndProc = WndProc;
-    wc.hInstance = hInstance;
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = CreateSolidBrush(RGB(32, 32, 32));
-    wc.lpszClassName = s_szClassName;
-    RegisterClassExW(&wc);
-    s_classRegistered = true;
+    if (!s_dragClassRegistered) {
+        WNDCLASSEXW wc = { 0 };
+        wc.cbSize = sizeof(WNDCLASSEXW);
+        wc.lpfnWndProc = DragWndProc;
+        wc.hInstance = hInstance;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)GetStockObject(NULL_BRUSH);
+        wc.lpszClassName = s_szDragClassName;
+        RegisterClassExW(&wc);
+        s_dragClassRegistered = true;
+    }
 }
 
 HWND CustomTabControl::Create(HWND hParent, int x, int y, int width, int height, UINT_PTR uId) {
@@ -71,7 +84,6 @@ HWND CustomTabControl::Create(HWND hParent, int x, int y, int width, int height,
 
     if (m_hWnd) {
         m_dpi = GetDpiForWindow(m_hWnd);
-        // フォントとレイアウトを初期化
         int lfHeight = -MulDiv(FONT_SIZE, m_dpi, 72);
         m_hFont = CreateFontW(
             lfHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -80,7 +92,6 @@ HWND CustomTabControl::Create(HWND hParent, int x, int y, int width, int height,
         );
         SendMessage(m_hWnd, WM_SETFONT, (WPARAM)m_hFont, FALSE);
 
-        // トラッキングを開始
         TRACKMOUSEEVENT tme;
         tme.cbSize = sizeof(tme);
         tme.dwFlags = TME_LEAVE;
@@ -93,6 +104,19 @@ HWND CustomTabControl::Create(HWND hParent, int x, int y, int width, int height,
 void CustomTabControl::AddTab(const std::wstring& title) {
     m_tabTitles.push_back(title);
     InvalidateRect(m_hWnd, NULL, TRUE);
+}
+
+void CustomTabControl::RemoveTab(int index) {
+    if (index >= 0 && index < (int)m_tabTitles.size()) {
+        m_tabTitles.erase(m_tabTitles.begin() + index);
+        if (m_selectedTab == index) {
+            m_selectedTab = min((int)m_tabTitles.size() - 1, m_selectedTab);
+        }
+        else if (m_selectedTab > index) {
+            m_selectedTab--;
+        }
+        InvalidateRect(m_hWnd, NULL, TRUE);
+    }
 }
 
 int CustomTabControl::GetCurSel() const {
@@ -139,7 +163,6 @@ int CustomTabControl::HitTest(int x, int y, bool* isCloseButton, bool* isScrollL
     RECT rcClient;
     GetClientRect(m_hWnd, &rcClient);
 
-    // スクロールボタンのヒットテスト
     if (m_totalTabsWidth > rcClient.right && x >= rcClient.right - m_scrollButtonWidth * 2) {
         if (x >= m_scrollLeftRect.left && x <= m_scrollLeftRect.right && y >= m_scrollLeftRect.top && y <= m_scrollLeftRect.bottom) {
             if (isScrollLeft) *isScrollLeft = true;
@@ -152,7 +175,8 @@ int CustomTabControl::HitTest(int x, int y, bool* isCloseButton, bool* isScrollL
     }
 
     int totalWidth = -m_scrollOffset;
-    int closeBtnW = MulDiv(TAB_CLOSE_BUTTON_WIDTH, m_dpi, 96);
+    int tabHeight = MulDiv(FONT_SIZE, m_dpi, 72) + MulDiv(TAB_PADDING_Y * 2, m_dpi, 96);
+    int closeBtnW = tabHeight;
     int tabPaddingX = MulDiv(TAB_PADDING_X, m_dpi, 96);
 
     for (size_t i = 0; i < m_tabTitles.size(); ++i) {
@@ -163,7 +187,7 @@ int CustomTabControl::HitTest(int x, int y, bool* isCloseButton, bool* isScrollL
         ReleaseDC(m_hWnd, hdc);
 
         int tabWidth = size.cx + tabPaddingX + closeBtnW;
-        RECT tabRect = { totalWidth, 0, totalWidth + tabWidth, MulDiv(FONT_SIZE, m_dpi, 72) + MulDiv(TAB_PADDING_Y * 2, m_dpi, 96) };
+        RECT tabRect = { totalWidth, 0, totalWidth + tabWidth, tabHeight };
 
         if (x >= tabRect.left && x < tabRect.right && y >= tabRect.top && y < tabRect.bottom) {
             if (isCloseButton) {
@@ -212,9 +236,34 @@ LRESULT CALLBACK CustomTabControl::WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
         case WM_DPICHANGED:
             pThis->OnDpiChanged(hWnd, LOWORD(wParam));
             return 0;
+        case WM_TIMER:
+            if (wParam == TAB_ANIMATION_TIMER_ID) {
+                pThis->OnTimer();
+                return 0;
+            }
+            break;
         case WM_DESTROY:
-            // オブジェクトのクリーンアップは所有者が行う
             pThis->m_hWnd = NULL;
+            break;
+        }
+    }
+    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
+}
+
+LRESULT CALLBACK CustomTabControl::DragWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    CustomTabControl* pThis = reinterpret_cast<CustomTabControl*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+
+    if (pThis) {
+        switch (uMsg) {
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hWnd, &ps);
+            pThis->DrawDragWindow(hdc);
+            EndPaint(hWnd, &ps);
+            return 0;
+        }
+        case WM_DESTROY:
+            pThis->m_hDragWnd = NULL;
             break;
         }
     }
@@ -233,55 +282,56 @@ void CustomTabControl::OnPaint(HWND hWnd) {
 
     m_totalTabsWidth = 0;
     int tabHeight = MulDiv(FONT_SIZE, m_dpi, 72) + MulDiv(TAB_PADDING_Y * 2, m_dpi, 96);
-    int closeBtnW = MulDiv(TAB_CLOSE_BUTTON_WIDTH, m_dpi, 96);
+    int closeBtnW = tabHeight;
     int tabPaddingX = MulDiv(TAB_PADDING_X, m_dpi, 96);
+    std::vector<int> tabWidths(m_tabTitles.size());
+    std::vector<int> tabXPositions(m_tabTitles.size());
 
+    HDC hdcTemp = GetDC(hWnd);
+    SelectObject(hdcTemp, m_hFont);
     for (size_t i = 0; i < m_tabTitles.size(); ++i) {
-        HDC hdcTemp = GetDC(hWnd);
-        SelectObject(hdcTemp, m_hFont);
         SIZE size;
         GetTextExtentPoint32W(hdcTemp, m_tabTitles[i].c_str(), (int)m_tabTitles[i].length(), &size);
-        ReleaseDC(hWnd, hdcTemp);
-        m_totalTabsWidth += size.cx + tabPaddingX + closeBtnW;
+        tabWidths[i] = size.cx + tabPaddingX + closeBtnW;
+        m_totalTabsWidth += tabWidths[i];
     }
+    ReleaseDC(hWnd, hdcTemp);
 
     m_scrollButtonWidth = MulDiv(30, m_dpi, 96);
     m_scrollButtonHeight = tabHeight;
     bool showScrollButtons = m_totalTabsWidth > clientRect.right;
-
-    // スクロール可能な最大オフセットを計算
     int maxScrollOffset = max(0, m_totalTabsWidth - (clientRect.right - (showScrollButtons ? m_scrollButtonWidth * 2 : 0)));
     m_scrollOffset = min(maxScrollOffset, max(0, m_scrollOffset));
 
-    // タブの描画領域を設定
     RECT tabsDrawingRect = clientRect;
     if (showScrollButtons) {
         tabsDrawingRect.right -= m_scrollButtonWidth * 2;
     }
     IntersectClipRect(hdc, tabsDrawingRect.left, tabsDrawingRect.top, tabsDrawingRect.right, tabsDrawingRect.bottom);
 
-    // タブの描画
     int currentX = -m_scrollOffset;
     for (size_t i = 0; i < m_tabTitles.size(); ++i) {
-        HDC hdcTemp = GetDC(hWnd);
-        SelectObject(hdcTemp, m_hFont);
-        SIZE size;
-        GetTextExtentPoint32W(hdcTemp, m_tabTitles[i].c_str(), (int)m_tabTitles[i].length(), &size);
-        ReleaseDC(hWnd, hdcTemp);
+        tabXPositions[i] = currentX;
+        currentX += tabWidths[i];
+    }
 
-        int tabWidth = size.cx + tabPaddingX + closeBtnW;
-        RECT rect = { currentX, 0, currentX + tabWidth, tabHeight };
+    for (size_t i = 0; i < m_tabTitles.size(); ++i) {
+        if (m_isDragging && i == m_draggedTabIndex) {
+            continue;
+        }
 
+        int xPos = tabXPositions[i];
+        if (m_isDragging && i < m_draggedTabsCurrentPositions.size()) {
+            xPos = m_draggedTabsCurrentPositions[i] + (int)((m_draggedTabsTargetPositions[i] - m_draggedTabsCurrentPositions[i]) * 0.2);
+            m_draggedTabsCurrentPositions[i] = xPos;
+        }
+
+        RECT rect = { xPos, 0, xPos + tabWidths[i], tabHeight };
         bool isActive = (i == m_selectedTab);
         bool isHovered = (i == m_hoveredTab);
         bool isCloseHovered = (i == m_hoveredCloseButtonTab);
 
-        if (m_isDragging && i == m_draggedTabIndex) {
-            currentX += tabWidth;
-            continue;
-        }
-
-        if (m_isDragging && m_hoveredTab != -1 && m_draggedTabIndex != -1 && m_draggedTabIndex != m_hoveredTab && i == m_hoveredTab) {
+        if (m_isDragging && m_hoveredTab != -1 && i == m_hoveredTab) {
             HPEN hPenIndicator = CreatePen(PS_SOLID, 2, RGB(0, 120, 215));
             HPEN hOldPen = (HPEN)SelectObject(hdc, hPenIndicator);
             int dropX = (m_draggedTabIndex < m_hoveredTab) ? rect.right : rect.left;
@@ -292,48 +342,30 @@ void CustomTabControl::OnPaint(HWND hWnd) {
         }
 
         DrawTab(hdc, i, rect, isActive, isHovered, isCloseHovered);
-        currentX += tabWidth;
     }
 
-    if (m_isDragging && m_draggedTabIndex != -1) {
-        DrawTab(hdc, m_draggedTabIndex, m_draggedTabRect, true, true, false);
-    }
-
-    // クリップ領域をリセット
     SelectClipRgn(hdc, NULL);
 
-    // スクロールボタンの描画
     if (showScrollButtons) {
         m_scrollLeftRect = { clientRect.right - m_scrollButtonWidth * 2, 0, clientRect.right - m_scrollButtonWidth, m_scrollButtonHeight };
         m_scrollRightRect = { clientRect.right - m_scrollButtonWidth, 0, clientRect.right, m_scrollButtonHeight };
-
         HBRUSH hScrollBrush = CreateSolidBrush(m_isScrollLeftHovered ? RGB(60, 60, 60) : m_clrBg);
         FillRect(hdc, &m_scrollLeftRect, hScrollBrush);
         DeleteObject(hScrollBrush);
-        POINT triangleLeft[] = {
-            {m_scrollLeftRect.left + MulDiv(10, m_dpi, 96), m_scrollLeftRect.top + MulDiv(15, m_dpi, 96)},
-            {m_scrollLeftRect.left + MulDiv(15, m_dpi, 96), m_scrollLeftRect.top + MulDiv(10, m_dpi, 96)},
-            {m_scrollLeftRect.left + MulDiv(15, m_dpi, 96), m_scrollLeftRect.top + MulDiv(20, m_dpi, 96)}
-        };
+        POINT triangleLeft[] = { {m_scrollLeftRect.left + MulDiv(10, m_dpi, 96), m_scrollLeftRect.top + MulDiv(15, m_dpi, 96)},{m_scrollLeftRect.left + MulDiv(15, m_dpi, 96), m_scrollLeftRect.top + MulDiv(10, m_dpi, 96)},{m_scrollLeftRect.left + MulDiv(15, m_dpi, 96), m_scrollLeftRect.top + MulDiv(20, m_dpi, 96)} };
         HBRUSH hTriangleBrush = CreateSolidBrush(m_clrText);
         SelectObject(hdc, hTriangleBrush);
         Polygon(hdc, triangleLeft, 3);
         DeleteObject(hTriangleBrush);
-
         hScrollBrush = CreateSolidBrush(m_isScrollRightHovered ? RGB(60, 60, 60) : m_clrBg);
         FillRect(hdc, &m_scrollRightRect, hScrollBrush);
         DeleteObject(hScrollBrush);
-        POINT triangleRight[] = {
-            {m_scrollRightRect.left + MulDiv(15, m_dpi, 96), m_scrollRightRect.top + MulDiv(10, m_dpi, 96)},
-            {m_scrollRightRect.left + MulDiv(20, m_dpi, 96), m_scrollRightRect.top + MulDiv(15, m_dpi, 96)},
-            {m_scrollRightRect.left + MulDiv(15, m_dpi, 96), m_scrollRightRect.top + MulDiv(20, m_dpi, 96)}
-        };
+        POINT triangleRight[] = { {m_scrollRightRect.left + MulDiv(15, m_dpi, 96), m_scrollRightRect.top + MulDiv(10, m_dpi, 96)},{m_scrollRightRect.left + MulDiv(20, m_dpi, 96), m_scrollRightRect.top + MulDiv(15, m_dpi, 96)},{m_scrollRightRect.left + MulDiv(15, m_dpi, 96), m_scrollRightRect.top + MulDiv(20, m_dpi, 96)} };
         hTriangleBrush = CreateSolidBrush(m_clrText);
         SelectObject(hdc, hTriangleBrush);
         Polygon(hdc, triangleRight, 3);
         DeleteObject(hTriangleBrush);
     }
-
     EndPaint(hWnd, &ps);
 }
 
@@ -379,33 +411,33 @@ void CustomTabControl::DrawTab(HDC hdc, int index, const RECT& rect, bool isActi
     SelectObject(hdc, m_hFont);
     RECT rcText = rect;
     rcText.left += MulDiv(TAB_PADDING_X, m_dpi, 96) / 2;
-    int closeBtnW = MulDiv(TAB_CLOSE_BUTTON_WIDTH, m_dpi, 96);
+    int closeBtnW = rect.bottom - rect.top;
     rcText.right -= closeBtnW;
     DrawTextW(hdc, m_tabTitles[index].c_str(), -1, &rcText, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
 
-    int closeBtnX = rect.right - MulDiv(TAB_PADDING_X, m_dpi, 96) / 2 - closeBtnW;
-    int closeBtnY = rect.top + (rect.bottom - rect.top - MulDiv(TAB_CLOSE_BUTTON_HEIGHT, m_dpi, 96)) / 2;
-    RECT rcClose = { closeBtnX, closeBtnY, closeBtnX + closeBtnW, closeBtnY + MulDiv(TAB_CLOSE_BUTTON_HEIGHT, m_dpi, 96) };
+    int closeBtnX = rect.right - closeBtnW;
+    RECT rcCloseRect = { closeBtnX, rect.top, rect.right, rect.bottom };
 
-    HBRUSH hCloseBrush = isCloseHovered ? CreateSolidBrush(m_clrCloseHoverBg) : (HBRUSH)GetStockObject(NULL_BRUSH);
-    HPEN hClosePen = CreatePen(PS_SOLID, 1, isCloseHovered ? RGB(255, 255, 255) : m_clrCloseText);
-    HBRUSH hOldCloseBrush = (HBRUSH)SelectObject(hdc, hCloseBrush);
-    HPEN hOldClosePen = (HPEN)SelectObject(hdc, hClosePen);
-
-    Ellipse(hdc, rcClose.left, rcClose.top, rcClose.right, rcClose.bottom);
+    HBRUSH hCloseBrush = isCloseHovered ? CreateSolidBrush(RGB(96, 96, 96)) : (HBRUSH)GetStockObject(NULL_BRUSH);
+    if (isCloseHovered) {
+        FillRect(hdc, &rcCloseRect, hCloseBrush);
+    }
+    DeleteObject(hCloseBrush);
 
     COLORREF oldTextColor = SetTextColor(hdc, isCloseHovered ? RGB(255, 255, 255) : m_clrCloseText);
-    int x1 = rcClose.left + roundf(closeBtnW * 0.3f);
-    int y1 = rcClose.top + roundf(MulDiv(TAB_CLOSE_BUTTON_HEIGHT, m_dpi, 96) * 0.3f);
-    int x2 = rcClose.right - roundf(closeBtnW * 0.3f);
-    int y2 = rcClose.bottom - roundf(MulDiv(TAB_CLOSE_BUTTON_HEIGHT, m_dpi, 96) * 0.3f);
+    HPEN hClosePen = CreatePen(PS_SOLID, 1, isCloseHovered ? RGB(255, 255, 255) : m_clrCloseText);
+    HPEN hOldClosePen = (HPEN)SelectObject(hdc, hClosePen);
+
+    int crossPadding = MulDiv(8, m_dpi, 96);
+    int x1 = rcCloseRect.left + crossPadding;
+    int y1 = rcCloseRect.top + crossPadding;
+    int x2 = rcCloseRect.right - crossPadding;
+    int y2 = rcCloseRect.bottom - crossPadding;
     MoveToEx(hdc, x1, y1, NULL); LineTo(hdc, x2, y2);
     MoveToEx(hdc, x1, y2, NULL); LineTo(hdc, x2, y1);
-    SetTextColor(hdc, oldTextColor);
 
-    SelectObject(hdc, hOldCloseBrush);
+    SetTextColor(hdc, oldTextColor);
     SelectObject(hdc, hOldClosePen);
-    DeleteObject(hCloseBrush);
     DeleteObject(hClosePen);
 }
 
@@ -439,16 +471,7 @@ void CustomTabControl::OnLButtonDown(HWND hWnd, int x, int y) {
 
     if (index != -1) {
         if (isClose) {
-            if (m_tabTitles.size() > 1) {
-                m_tabTitles.erase(m_tabTitles.begin() + index);
-                if (m_selectedTab == index) {
-                    m_selectedTab = min((int)m_tabTitles.size() - 1, m_selectedTab);
-                }
-                else if (m_selectedTab > index) {
-                    m_selectedTab--;
-                }
-                InvalidateRect(hWnd, NULL, TRUE);
-            }
+            RemoveTab(index);
         }
         else {
             m_selectedTab = index;
@@ -456,6 +479,9 @@ void CustomTabControl::OnLButtonDown(HWND hWnd, int x, int y) {
             m_dragStartPos.x = x;
             m_dragStartPos.y = y;
             SetCapture(hWnd);
+
+            CreateDragWindow(index);
+
             InvalidateRect(hWnd, NULL, TRUE);
         }
     }
@@ -486,26 +512,99 @@ void CustomTabControl::OnMouseMove(HWND hWnd, int x, int y) {
             if (abs(x - m_dragStartPos.x) > GetSystemMetrics(SM_CXDRAG) ||
                 abs(y - m_dragStartPos.y) > GetSystemMetrics(SM_CYDRAG)) {
                 m_isDragging = true;
-                int totalWidth = -m_scrollOffset;
-                int closeBtnW = MulDiv(TAB_CLOSE_BUTTON_WIDTH, m_dpi, 96);
+
+                int tabHeight = MulDiv(FONT_SIZE, m_dpi, 72) + MulDiv(TAB_PADDING_Y * 2, m_dpi, 96);
+                int closeBtnW = tabHeight;
                 int tabPaddingX = MulDiv(TAB_PADDING_X, m_dpi, 96);
-                for (int i = 0; i < m_draggedTabIndex; ++i) {
+
+                // アニメーションの初期位置と目標位置を計算
+                m_draggedTabsCurrentPositions.clear();
+                m_draggedTabsTargetPositions.clear();
+                int currentX = -m_scrollOffset;
+                for (size_t i = 0; i < m_tabTitles.size(); ++i) {
                     HDC hdc = GetDC(m_hWnd);
                     SelectObject(hdc, m_hFont);
-                    SIZE size;
-                    GetTextExtentPoint32W(hdc, m_tabTitles[i].c_str(), (int)m_tabTitles[i].length(), &size);
+                    SIZE s;
+                    GetTextExtentPoint32W(hdc, m_tabTitles[i].c_str(), (int)m_tabTitles[i].length(), &s);
                     ReleaseDC(m_hWnd, hdc);
-                    totalWidth += size.cx + tabPaddingX + closeBtnW;
+                    int w = s.cx + tabPaddingX + closeBtnW;
+
+                    if (i == m_draggedTabIndex) {
+                        m_draggedTabsCurrentPositions.push_back(currentX); // ダミー位置
+                        m_draggedTabsTargetPositions.push_back(currentX); // ダミー位置
+                        currentX += w;
+                        continue;
+                    }
+
+                    m_draggedTabsCurrentPositions.push_back(currentX);
+                    m_draggedTabsTargetPositions.push_back(currentX);
+                    currentX += w;
                 }
-                m_draggedTabRect = { totalWidth, 0, totalWidth + (int)m_tabTitles[m_draggedTabIndex].length() + tabPaddingX + closeBtnW, (int)MulDiv(FONT_SIZE, m_dpi, 72) + MulDiv(TAB_PADDING_Y * 2, m_dpi, 96) };
+
+                SetTimer(hWnd, TAB_ANIMATION_TIMER_ID, 10, NULL);
+                m_animationTimerRunning = true;
             }
         }
 
         if (m_isDragging) {
-            m_draggedTabRect.left += (x - m_dragStartPos.x);
-            m_draggedTabRect.right += (x - m_dragStartPos.x);
-            m_dragStartPos.x = x;
-            m_dragStartPos.y = y;
+            POINT pt;
+            GetCursorPos(&pt);
+
+            int tabHeight = MulDiv(FONT_SIZE, m_dpi, 72) + MulDiv(TAB_PADDING_Y * 2, m_dpi, 96);
+            int closeBtnW = tabHeight;
+            int tabPaddingX = MulDiv(TAB_PADDING_X, m_dpi, 96);
+            HDC hdc = GetDC(m_hWnd);
+            SelectObject(hdc, m_hFont);
+            SIZE size;
+            GetTextExtentPoint32W(hdc, m_tabTitles[m_draggedTabIndex].c_str(), (int)m_tabTitles[m_draggedTabIndex].length(), &size);
+            ReleaseDC(m_hWnd, hdc);
+            int tabWidth = size.cx + tabPaddingX + closeBtnW;
+
+            SetWindowPos(m_hDragWnd, NULL, pt.x - tabWidth / 2, pt.y - tabHeight / 2, tabWidth, tabHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+
+            int hoveredIndex = HitTest(x, y, nullptr, nullptr, nullptr);
+            if (hoveredIndex != -1 && hoveredIndex != m_draggedTabIndex) {
+                if (m_hoveredTab != hoveredIndex) {
+                    m_hoveredTab = hoveredIndex;
+                    std::vector<int> newPositions;
+                    int currentX = -m_scrollOffset;
+
+                    for (size_t i = 0; i < m_tabTitles.size(); ++i) {
+                        HDC hdc = GetDC(m_hWnd);
+                        SelectObject(hdc, m_hFont);
+                        SIZE s;
+                        GetTextExtentPoint32W(hdc, m_tabTitles[i].c_str(), (int)m_tabTitles[i].length(), &s);
+                        ReleaseDC(m_hWnd, hdc);
+                        int w = s.cx + tabPaddingX + closeBtnW;
+
+                        if (i == m_draggedTabIndex) {
+                            // ドラッグ中のタブは位置計算から除外
+                            continue;
+                        }
+
+                        // 目標位置を再計算
+                        if (m_draggedTabIndex < hoveredIndex) {
+                            if (i > m_draggedTabIndex && i <= hoveredIndex) {
+                                newPositions.push_back(currentX - w);
+                            }
+                            else {
+                                newPositions.push_back(currentX);
+                            }
+                        }
+                        else {
+                            if (i < m_draggedTabIndex && i >= hoveredIndex) {
+                                newPositions.push_back(currentX + tabWidth);
+                            }
+                            else {
+                                newPositions.push_back(currentX);
+                            }
+                        }
+
+                        currentX += w;
+                    }
+                    m_draggedTabsTargetPositions = newPositions;
+                }
+            }
             InvalidateRect(hWnd, NULL, FALSE);
         }
     }
@@ -521,6 +620,13 @@ void CustomTabControl::OnMouseMove(HWND hWnd, int x, int y) {
 void CustomTabControl::OnLButtonUp(HWND hWnd, int x, int y) {
     if (m_isDragging) {
         ReleaseCapture();
+        DestroyDragWindow();
+
+        if (m_animationTimerRunning) {
+            KillTimer(hWnd, TAB_ANIMATION_TIMER_ID);
+            m_animationTimerRunning = false;
+        }
+
         bool isClose = false;
         bool isScrollLeft = false;
         bool isScrollRight = false;
@@ -557,4 +663,133 @@ void CustomTabControl::OnDpiChanged(HWND hWnd, int dpi) {
     );
     SendMessage(m_hWnd, WM_SETFONT, (WPARAM)m_hFont, FALSE);
     InvalidateRect(hWnd, NULL, TRUE);
+}
+
+void CustomTabControl::OnTimer() {
+    bool animationComplete = true;
+    for (size_t i = 0; i < m_draggedTabsCurrentPositions.size(); ++i) {
+        if (i < m_draggedTabsTargetPositions.size() && m_draggedTabsCurrentPositions[i] != m_draggedTabsTargetPositions[i]) {
+            int delta = (m_draggedTabsTargetPositions[i] - m_draggedTabsCurrentPositions[i]) / 5;
+            if (abs(delta) < 2) {
+                delta = m_draggedTabsTargetPositions[i] - m_draggedTabsCurrentPositions[i];
+            }
+            m_draggedTabsCurrentPositions[i] += delta;
+            animationComplete = false;
+        }
+    }
+    if (animationComplete) {
+        KillTimer(m_hWnd, TAB_ANIMATION_TIMER_ID);
+        m_animationTimerRunning = false;
+    }
+    InvalidateRect(m_hWnd, NULL, FALSE);
+}
+
+void CustomTabControl::CreateDragWindow(int tabIndex) {
+    if (m_hDragWnd) {
+        return;
+    }
+
+    POINT ptCursor;
+    GetCursorPos(&ptCursor);
+
+    int tabHeight = MulDiv(FONT_SIZE, m_dpi, 72) + MulDiv(TAB_PADDING_Y * 2, m_dpi, 96);
+    int closeBtnW = tabHeight;
+    int tabPaddingX = MulDiv(TAB_PADDING_X, m_dpi, 96);
+    HDC hdc = GetDC(m_hWnd);
+    SelectObject(hdc, m_hFont);
+    SIZE size;
+    GetTextExtentPoint32W(hdc, m_tabTitles[tabIndex].c_str(), (int)m_tabTitles[tabIndex].length(), &size);
+    ReleaseDC(m_hWnd, hdc);
+    int tabWidth = size.cx + tabPaddingX + closeBtnW;
+
+    m_hDragWnd = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW, s_szDragClassName, L"",
+        WS_POPUP | WS_VISIBLE,
+        ptCursor.x - tabWidth / 2, ptCursor.y - tabHeight / 2, tabWidth, tabHeight,
+        NULL, NULL, GetModuleHandle(NULL), this
+    );
+
+    if (m_hDragWnd) {
+        BLENDFUNCTION blend = { 0 };
+        blend.BlendOp = AC_SRC_OVER;
+        blend.SourceConstantAlpha = 180;
+        blend.AlphaFormat = 0;
+
+        HDC hdcScreen = GetDC(NULL);
+        HDC hdcMem = CreateCompatibleDC(hdcScreen);
+        HBITMAP hbmTab = CreateCompatibleBitmap(hdcScreen, tabWidth, tabHeight);
+        HBITMAP hbmOld = (HBITMAP)SelectObject(hdcMem, hbmTab);
+
+        RECT rc = { 0, 0, tabWidth, tabHeight };
+        HBRUSH hClearBrush = CreateSolidBrush(m_clrBg);
+        FillRect(hdcMem, &rc, hClearBrush);
+        DeleteObject(hClearBrush);
+
+        DrawTab(hdcMem, tabIndex, rc, true, false, false);
+
+        POINT ptZero = { 0, 0 };
+        SIZE  sizeTab = { tabWidth, tabHeight };
+        UpdateLayeredWindow(m_hDragWnd, hdcScreen, NULL, &sizeTab, hdcMem, &ptZero, 0, &blend, ULW_ALPHA);
+
+        SelectObject(hdcMem, hbmOld);
+        DeleteObject(hbmTab);
+        DeleteDC(hdcMem);
+        ReleaseDC(NULL, hdcScreen);
+    }
+}
+
+void CustomTabControl::DestroyDragWindow() {
+    if (m_hDragWnd) {
+        DestroyWindow(m_hDragWnd);
+        m_hDragWnd = NULL;
+    }
+}
+
+void CustomTabControl::DrawDragWindow(HDC hdc) {
+    if (m_draggedTabIndex < 0 || m_draggedTabIndex >= m_tabTitles.size()) {
+        return;
+    }
+
+    int tabHeight = MulDiv(FONT_SIZE, m_dpi, 72) + MulDiv(TAB_PADDING_Y * 2, m_dpi, 96);
+    int closeBtnW = tabHeight;
+    int tabPaddingX = MulDiv(TAB_PADDING_X, m_dpi, 96);
+
+    RECT rc;
+    GetClientRect(m_hDragWnd, &rc);
+    int tabWidth = rc.right;
+
+    HBRUSH hBrush = CreateSolidBrush(m_clrActiveTab);
+    FillRect(hdc, &rc, hBrush);
+    DeleteObject(hBrush);
+
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, m_clrText);
+    SelectObject(hdc, m_hFont);
+
+    RECT rcText = rc;
+    rcText.left += MulDiv(TAB_PADDING_X, m_dpi, 96) / 2;
+    rcText.right -= closeBtnW;
+    DrawTextW(hdc, m_tabTitles[m_draggedTabIndex].c_str(), -1, &rcText, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
+
+    int closeBtnX = tabWidth - closeBtnW;
+    RECT rcCloseRect = { closeBtnX, 0, tabWidth, tabHeight };
+    HBRUSH hCloseBrush = CreateSolidBrush(RGB(96, 96, 96));
+    FillRect(hdc, &rcCloseRect, hCloseBrush);
+    DeleteObject(hCloseBrush);
+
+    COLORREF oldTextColor = SetTextColor(hdc, RGB(255, 255, 255));
+    HPEN hClosePen = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
+    HPEN hOldClosePen = (HPEN)SelectObject(hdc, hClosePen);
+
+    int crossPadding = MulDiv(8, m_dpi, 96);
+    int x1 = rcCloseRect.left + crossPadding;
+    int y1 = rcCloseRect.top + crossPadding;
+    int x2 = rcCloseRect.right - crossPadding;
+    int y2 = rcCloseRect.bottom - crossPadding;
+    MoveToEx(hdc, x1, y1, NULL); LineTo(hdc, x2, y2);
+    MoveToEx(hdc, x1, y2, NULL); LineTo(hdc, x2, y1);
+
+    SetTextColor(hdc, oldTextColor);
+    SelectObject(hdc, hOldClosePen);
+    DeleteObject(hClosePen);
 }
