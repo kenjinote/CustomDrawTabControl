@@ -1,5 +1,6 @@
 ﻿#include <windows.h>
 #include <dwmapi.h>
+#include <commctrl.h>
 #include "CustomTabControl.h"
 #include "resource.h"
 
@@ -43,12 +44,24 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 		}
         else if (LOWORD(wParam) == ID_ACCELERATOR40002) { // メニューからタブ選択
             // タブ削除
-			int curSel = g_tabControl.GetCurSel();
+            int curSel = g_tabControl.GetCurSel();
             if (curSel != -1) {
                 g_tabControl.SetCurSel(max(0, curSel - 1));
-				g_tabControl.RemoveTab(curSel);
+                g_tabControl.RemoveTab(curSel);
 
 
+            }
+        }
+        else if (LOWORD(wParam) == ID_ACCELERATOR40005) { //右のタブに切り替える
+            int curSel = g_tabControl.GetCurSel();
+			if (curSel != -1 && curSel < g_tabControl.GetTabCount() - 1) {
+				g_tabControl.SetCurSel(curSel + 1);
+			}
+        }
+        else if (LOWORD(wParam) == ID_ACCELERATOR40006) { //左のタブに切り替える
+			int curSel = g_tabControl.GetCurSel();
+            if (curSel > 0) {
+                g_tabControl.SetCurSel(curSel - 1);
             }
         }
         break;
@@ -60,6 +73,9 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow) {
+
+    InitCommonControls();
+
     WNDCLASSEXW wc = { 0 };
     wc.cbSize = sizeof(WNDCLASSEXW);
     wc.lpfnWndProc = MainWndProc;
