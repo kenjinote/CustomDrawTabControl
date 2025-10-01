@@ -79,7 +79,7 @@ HWND CustomTabControl::Create(HWND hParent, int x, int y, int width, int height,
     RegisterWindowClass(GetModuleHandle(NULL));
 
     m_hWnd = CreateWindowExW(
-        0, s_szClassName, L"",
+        0, s_szClassName, 0,
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
         x, y, width, height,
         hParent, (HMENU)uId, GetModuleHandle(NULL), this
@@ -236,6 +236,21 @@ int CustomTabControl::HitTest(int x, int y, bool* isCloseButton, bool* isScrollL
         if (x >= m_scrollLeftRect.left && x <= m_scrollLeftRect.right) {
             if (isScrollLeft) *isScrollLeft = true;
             return -1;
+        }
+    }
+
+    // ドラッグ中の場合は特別処理を行う
+    if (m_isDragging) {
+        int totalWidth = 0;
+        for (size_t i = 0; i < m_tabTitles.size(); ++i) {
+            totalWidth += GetTabWidth(i);
+        }
+
+        if (x < -m_scrollOffset) {
+            return 0;
+        }
+        if (x > totalWidth - m_scrollOffset) {
+            return (int)m_tabTitles.size() - 1;
         }
     }
 
@@ -576,21 +591,10 @@ void CustomTabControl::OnLButtonDown(HWND hWnd, int x, int y) {
 }
 
 void CustomTabControl::OnMouseMove(HWND hWnd, int x, int y) {
-
-
-
     bool isClose = false;
     bool isScrollLeft = false;
     bool isScrollRight = false;
     int newHoveredTab = HitTest(x, y, &isClose, &isScrollLeft, &isScrollRight);
-
-    {
-        // m_draggedTabIndex をデバッグ出力
-        WCHAR buffer[256];
-        wsprintfW(buffer, L"m_draggedTabIndex: %d \t newHoveredTab: %d\n", m_draggedTabIndex, newHoveredTab);
-        OutputDebugStringW(buffer);
-    }
-
 
     if (isScrollLeft != m_isScrollLeftHovered || isScrollRight != m_isScrollRightHovered) {
         m_isScrollLeftHovered = isScrollLeft;
@@ -778,11 +782,13 @@ void CustomTabControl::CreateDragWindow(int tabIndex) {
 
     m_hDragWnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-        s_szDragClassName, L"",
-        WS_POPUP | WS_VISIBLE,
+        s_szDragClassName, 0,
+        WS_POPUP,
         ptCursor.x - tabWidth / 2, ptCursor.y - tabHeight / 2, tabWidth, tabHeight,
         NULL, NULL, GetModuleHandle(NULL), this
     );
+
+	ShowWindow(m_hDragWnd, SW_SHOWNOACTIVATE);
 
     if (m_hDragWnd) {
         BLENDFUNCTION blend = { 0 };
