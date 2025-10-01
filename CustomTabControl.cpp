@@ -368,45 +368,26 @@ void CustomTabControl::OnPaint(HWND hWnd) {
         int xPos = currentX;
         int tabWidth = GetTabWidth(i);
 
-        if (m_isDragging && (int)i != m_draggedTabIndex) {
-            int targetX = 0;
-            int tempX = -m_scrollOffset;
-            if (m_hoveredTab != -1) {
-                std::vector<int> finalOrder;
-                for (size_t j = 0; j < m_tabTitles.size(); ++j) {
-                    if ((int)j == m_draggedTabIndex) continue;
-                    finalOrder.push_back(j);
-                }
-                finalOrder.insert(finalOrder.begin() + m_hoveredTab, m_draggedTabIndex);
-
-                for (int index : finalOrder) {
-                    if ((int)i == index) {
-                        targetX = tempX;
-                        break;
-                    }
-                    tempX += GetTabWidth(index);
-                }
+        if (m_isDragging) {
+            if ((int)i == m_draggedTabIndex) {
+                currentX += tabWidth;
+                continue;
             }
             else {
-                int nonDraggedTabsX = -m_scrollOffset;
-                for (size_t j = 0; j < m_tabTitles.size(); ++j) {
-                    if ((int)j != m_draggedTabIndex) {
-                        if ((int)i == (int)j) {
-                            xPos = nonDraggedTabsX;
-                            break;
-                        }
-                        nonDraggedTabsX += GetTabWidth(j);
+                int newPos = -1;
+                int draggedTabWidth = GetTabWidth(m_draggedTabIndex);
+
+                if (m_draggedTabIndex < m_hoveredTab) {
+                    if ((int)i > m_draggedTabIndex && (int)i <= m_hoveredTab) {
+                        xPos -= draggedTabWidth;
+                    }
+                }
+                else if (m_draggedTabIndex > m_hoveredTab) {
+                    if ((int)i >= m_hoveredTab && (int)i < m_draggedTabIndex) {
+                        xPos += draggedTabWidth;
                     }
                 }
             }
-
-            if (targetX != 0) {
-                xPos = targetX;
-            }
-        }
-        else if (m_isDragging && (int)i == m_draggedTabIndex) {
-            currentX += tabWidth;
-            continue;
         }
 
         tabRects[i] = { xPos, 0, xPos + tabWidth, tabHeight };
@@ -595,10 +576,21 @@ void CustomTabControl::OnLButtonDown(HWND hWnd, int x, int y) {
 }
 
 void CustomTabControl::OnMouseMove(HWND hWnd, int x, int y) {
+
+
+
     bool isClose = false;
     bool isScrollLeft = false;
     bool isScrollRight = false;
     int newHoveredTab = HitTest(x, y, &isClose, &isScrollLeft, &isScrollRight);
+
+    {
+        // m_draggedTabIndex をデバッグ出力
+        WCHAR buffer[256];
+        wsprintfW(buffer, L"m_draggedTabIndex: %d \t newHoveredTab: %d\n", m_draggedTabIndex, newHoveredTab);
+        OutputDebugStringW(buffer);
+    }
+
 
     if (isScrollLeft != m_isScrollLeftHovered || isScrollRight != m_isScrollRightHovered) {
         m_isScrollLeftHovered = isScrollLeft;
