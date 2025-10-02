@@ -1,10 +1,9 @@
 #pragma once
 
-#include <string>
+#include <Windows.h>
+#include <Windowsx.h>
 #include <vector>
-#include <windows.h>
-#include <windowsx.h>
-#include <commctrl.h>
+#include <string>
 
 class CustomTabControl {
 public:
@@ -12,7 +11,8 @@ public:
     ~CustomTabControl();
 
     static void RegisterWindowClass(HINSTANCE hInstance);
-    HWND Create(HWND hParent, int x, int y, int width, int height, UINT_PTR uId);
+    HWND Create(HWND hParent, int x, int y, int width, int height, UINT_PTR uId, BOOL IsDarkMode);
+
     void AddTab(const std::wstring& title);
     void RemoveTab(int index);
     void RenameTab(int index, const std::wstring& newTitle);
@@ -25,9 +25,10 @@ public:
 private:
     static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK DragWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK PopupWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+    static void RegisterPopupWindowClass(HINSTANCE hInstance);
 
     void OnPaint(HWND hWnd);
-    void DrawTab(HDC hdc, int index, const RECT& rect, bool isActive, bool isHovered, bool isCloseHovered);
     void OnSize(HWND hWnd);
     void OnLButtonDown(HWND hWnd, int x, int y);
     void OnMouseMove(HWND hWnd, int x, int y);
@@ -35,15 +36,21 @@ private:
     void OnLButtonUp(HWND hWnd, int x, int y);
     void OnMouseLeave(HWND hWnd);
     void OnDpiChanged(HWND hWnd, int dpi);
+
     void RecalculateTabPositions();
     int GetTabWidth(int index) const;
     int HitTest(int x, int y, bool* isCloseButton, bool* isScrollLeft, bool* isScrollRight) const;
+    void DrawTab(HDC hdc, int index, const RECT& rect, bool isActive, bool isHovered, bool isCloseHovered);
+
     void CreateDragWindow(int tabIndex);
     void DestroyDragWindow();
     void DrawDragWindow(HDC hdc);
-    void ShowTooltip(int index, int x, int y);
 
-    HWND m_hTooltipWnd;
+    void ShowCustomTooltip(int index, int x, int y);
+    void HideCustomTooltip();
+
+    void UpdateTheme(BOOL bIsDarkMode);
+
     HWND m_hWnd;
     HFONT m_hFont;
     int m_dpi;
@@ -55,6 +62,7 @@ private:
     int m_draggedTabIndex;
     bool m_isDragging;
     POINT m_dragStartPos;
+
     int m_scrollOffset;
     bool m_isScrollLeftHovered;
     bool m_isScrollRightHovered;
@@ -63,7 +71,6 @@ private:
     int m_scrollButtonHeight;
     RECT m_scrollLeftRect;
     RECT m_scrollRightRect;
-    HWND m_hDragWnd;
 
     COLORREF m_clrBg;
     COLORREF m_clrText;
@@ -71,4 +78,17 @@ private:
     COLORREF m_clrSeparator;
     COLORREF m_clrCloseHoverBg;
     COLORREF m_clrCloseText;
+    COLORREF m_clrHoverBg; // ★ 追加: タブのホバー色
+    COLORREF m_clrCloseButtonHoverBg;
+    COLORREF m_clrScrollButtonHoverBg;
+    COLORREF m_clrTooltipBg;
+    COLORREF m_clrTooltipText;
+
+    // 独自ツールチップ用のメンバ変数
+    HWND m_hDragWnd;
+    HWND m_hPopupWnd; // 独自のポップアップウィンドウハンドル
+    bool m_isPopupVisible;
+    std::wstring m_popupText;
+    int m_popupWidth;
+    int m_popupHeight;
 };

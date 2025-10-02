@@ -2,6 +2,7 @@
 #include <dwmapi.h>
 #include <commctrl.h>
 #include "CustomTabControl.h"
+#include "CUtil.h"
 #include "resource.h"
 
 #pragma comment(lib, "comctl32.lib")
@@ -14,12 +15,9 @@ static HWND g_hMainWnd;
 LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
     case WM_CREATE: {
-        // メインウィンドウの非クライアント領域をダークモードに設定
-        BOOL dark = TRUE;
-        DwmSetWindowAttribute(hWnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
-
-        // カスタムタブコントロールを作成
-        g_tabControl.Create(hWnd, 0, 0, 800, 40, 1000);
+        BOOL isDarkMode = CUtil::IsSystemInDarkTheme() ? TRUE : FALSE;
+        DwmSetWindowAttribute(hWnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &isDarkMode, sizeof(isDarkMode));
+        g_tabControl.Create(hWnd, 0, 0, 800, 40, 1000, isDarkMode);
 
         // レイアウトを更新
         RECT rc;
@@ -28,11 +26,13 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         return 0;
     }
     case WM_SIZE:
-        // ウィンドウサイズ変更時にタブコントロールのサイズを調整
-        if (g_tabControl.GetCurSel() != -1) {
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-            SetWindowPos(g_tabControl.GetHwnd(), NULL, 0, 0, rc.right, 40, SWP_NOZORDER);
+        {
+		    HWND hTab = g_tabControl.GetHwnd();
+            if (IsWindow(hTab)) {
+                RECT rc;
+                GetClientRect(hWnd, &rc);
+                SetWindowPos(hTab, NULL, 0, 0, rc.right, 40, SWP_NOZORDER);
+            }
         }
         return 0;
     case WM_COMMAND:
@@ -48,8 +48,6 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             if (curSel != -1) {
                 g_tabControl.SetCurSel(max(0, curSel - 1));
                 g_tabControl.RemoveTab(curSel);
-
-
             }
         }
         else if (LOWORD(wParam) == ID_ACCELERATOR40005) { //右のタブに切り替える
@@ -63,6 +61,13 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             if (curSel > 0) {
                 g_tabControl.SetCurSel(curSel - 1);
             }
+        }
+        break;
+    case WM_SETTINGCHANGE:
+        if (lParam != NULL && wcscmp(L"ImmersiveColorSet", (LPCWSTR)lParam) == 0) {
+			BOOL isDarkMode = CUtil::IsSystemInDarkTheme() ? TRUE : FALSE;
+            DwmSetWindowAttribute(hWnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &isDarkMode, sizeof(isDarkMode));
+            SendMessage(g_tabControl.GetHwnd(), WM_APP, isDarkMode, 0);
         }
         break;
     case WM_DESTROY:
@@ -81,7 +86,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     wc.lpfnWndProc = MainWndProc;
     wc.hInstance = hInstance;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = CreateSolidBrush(RGB(32, 32, 32));
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = L"CustomTabApp";
     if (!RegisterClassExW(&wc)) return 1;
 

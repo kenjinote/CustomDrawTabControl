@@ -159,10 +159,12 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="CustomTabControl.cpp" />
+    <ClCompile Include="CUtil.cpp" />
     <ClCompile Include="Source.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="CustomTabControl.h" />
+    <ClInclude Include="CUtil.h" />
     <ClInclude Include="resource.h" />
   </ItemGroup>
   <ItemGroup>

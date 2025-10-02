@@ -4,6 +4,7 @@
 #include <commctrl.h>
 #include <algorithm>
 #include <math.h>
+#include "CUtil.h"
 
 #define TAB_PADDING_X 16
 #define TAB_PADDING_Y 8
@@ -12,8 +13,54 @@
 
 static const WCHAR s_szClassName[] = L"CustomTabControlClass";
 static const WCHAR s_szDragClassName[] = L"CustomTabDragClass";
+static const WCHAR s_szPopupClassName[] = L"CustomTabPopupClass";
 static bool s_classRegistered = false;
 static bool s_dragClassRegistered = false;
+static bool s_popupClassRegistered = false;
+
+LRESULT CALLBACK CustomTabControl::PopupWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    CustomTabControl* pThis = reinterpret_cast<CustomTabControl*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+    if (pThis) {
+        switch (uMsg) {
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hWnd, &ps);
+            RECT rcClient;
+            GetClientRect(hWnd, &rcClient);
+
+            // 背景の描画を修正
+            HBRUSH hBrush = CreateSolidBrush(pThis->m_clrTooltipBg);
+            FillRect(hdc, &rcClient, hBrush);
+            DeleteObject(hBrush);
+
+            // テキストの描画を修正
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, pThis->m_clrTooltipText);
+            SelectObject(hdc, pThis->m_hFont);
+            DrawTextW(hdc, pThis->m_popupText.c_str(), -1, &rcClient, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+
+            EndPaint(hWnd, &ps);
+            return 0;
+        }
+        case WM_DESTROY:
+            pThis->m_hPopupWnd = NULL;
+            break;
+        }
+    }
+    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
+}
+
+void CustomTabControl::RegisterPopupWindowClass(HINSTANCE hInstance) {
+    if (!s_popupClassRegistered) {
+        WNDCLASSEXW wc = { 0 };
+        wc.cbSize = sizeof(WNDCLASSEXW);
+        wc.lpfnWndProc = PopupWndProc;
+        wc.hInstance = hInstance;
+        wc.lpszClassName = s_szPopupClassName;
+        RegisterClassExW(&wc);
+        s_popupClassRegistered = true;
+    }
+}
 
 CustomTabControl::CustomTabControl()
     : m_hWnd(NULL), m_hFont(NULL), m_dpi(96), m_selectedTab(0), m_hoveredTab(-1),
@@ -21,7 +68,7 @@ CustomTabControl::CustomTabControl()
     m_draggedTabIndex(-1), m_isDragging(false),
     m_scrollOffset(0), m_isScrollLeftHovered(false), m_isScrollRightHovered(false),
     m_totalTabsWidth(0), m_scrollButtonWidth(0), m_scrollButtonHeight(0),
-    m_hDragWnd(NULL), m_hTooltipWnd(NULL) {
+    m_hDragWnd(NULL), m_hPopupWnd(NULL), m_isPopupVisible(false) {
 
     m_tabTitles.push_back(L"Tab 1");
     m_tabTitles.push_back(L"Tab 2");
@@ -43,8 +90,8 @@ CustomTabControl::~CustomTabControl() {
     if (m_hFont) {
         DeleteObject(m_hFont);
     }
-    if (m_hTooltipWnd) {
-        DestroyWindow(m_hTooltipWnd);
+    if (m_hPopupWnd) {
+        DestroyWindow(m_hPopupWnd);
     }
     DestroyDragWindow();
 }
@@ -75,8 +122,9 @@ void CustomTabControl::RegisterWindowClass(HINSTANCE hInstance) {
     }
 }
 
-HWND CustomTabControl::Create(HWND hParent, int x, int y, int width, int height, UINT_PTR uId) {
+HWND CustomTabControl::Create(HWND hParent, int x, int y, int width, int height, UINT_PTR uId, BOOL IsDarkMode) {
     RegisterWindowClass(GetModuleHandle(NULL));
+    RegisterPopupWindowClass(GetModuleHandle(NULL));
 
     m_hWnd = CreateWindowExW(
         0, s_szClassName, 0,
@@ -86,21 +134,21 @@ HWND CustomTabControl::Create(HWND hParent, int x, int y, int width, int height,
     );
 
     if (m_hWnd) {
-        m_hTooltipWnd = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-            TOOLTIPS_CLASSW,
-            NULL,
-            WS_POPUP | TTS_ALWAYSTIP,
-            CW_USEDEFAULT, CW_USEDEFAULT,
-            CW_USEDEFAULT, CW_USEDEFAULT,
-            m_hWnd,
+        // 独自のポップアップウィンドウを作成
+        m_hPopupWnd = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            s_szPopupClassName,
+            L"",
+            WS_POPUP,
+            0, 0, 0, 0,
+            m_hWnd, // 親ウィンドウを設定
             NULL,
             GetModuleHandle(NULL),
             NULL
         );
-        if (m_hTooltipWnd) {
-            SendMessageW(m_hTooltipWnd, TTM_SETMAXTIPWIDTH, 0, 300);
-            SendMessageW(m_hTooltipWnd, TTM_ACTIVATE, TRUE, 0);
+        if (m_hPopupWnd) {
+            // GWLP_USERDATAを設定して、ウィンドウプロシージャからCustomTabControlインスタンスにアクセス可能にする
+            SetWindowLongPtr(m_hPopupWnd, GWLP_USERDATA, (LONG_PTR)this);
         }
 
         m_dpi = GetDpiForWindow(m_hWnd);
@@ -118,6 +166,8 @@ HWND CustomTabControl::Create(HWND hParent, int x, int y, int width, int height,
         tme.hwndTrack = m_hWnd;
         tme.dwHoverTime = HOVER_DEFAULT;
         _TrackMouseEvent(&tme);
+
+        UpdateTheme(IsDarkMode);
     }
     return m_hWnd;
 }
@@ -239,7 +289,6 @@ int CustomTabControl::HitTest(int x, int y, bool* isCloseButton, bool* isScrollL
         }
     }
 
-    // ドラッグ中の場合は特別処理を行う
     if (m_isDragging) {
         int totalWidth = 0;
         for (size_t i = 0; i < m_tabTitles.size(); ++i) {
@@ -316,6 +365,9 @@ LRESULT CALLBACK CustomTabControl::WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
             return 0;
         case WM_DPICHANGED:
             pThis->OnDpiChanged(hWnd, LOWORD(wParam));
+            return 0;
+        case WM_APP:
+            pThis->UpdateTheme((BOOL)wParam);
             return 0;
         case WM_DESTROY:
             pThis->m_hWnd = NULL;
@@ -415,31 +467,12 @@ void CustomTabControl::OnPaint(HWND hWnd) {
         currentX += tabWidth;
     }
 
-    if (m_isDragging && m_hoveredTab != -1) {
-        RECT rect = tabRects[m_hoveredTab];
-        HPEN hPenIndicator = CreatePen(PS_SOLID, 4, RGB(0, 200, 255));
-        HPEN hOldPen = (HPEN)SelectObject(hdcMem, hPenIndicator);
-
-        int dropX = 0;
-        if (m_draggedTabIndex < m_hoveredTab) {
-            dropX = rect.right;
-        }
-        else {
-            dropX = rect.left;
-        }
-
-        MoveToEx(hdcMem, dropX, rect.top + MulDiv(3, m_dpi, 96), NULL);
-        LineTo(hdcMem, dropX, rect.bottom - MulDiv(3, m_dpi, 96));
-        SelectObject(hdcMem, hOldPen);
-        DeleteObject(hPenIndicator);
-    }
-
     SelectClipRgn(hdcMem, NULL);
 
     if (showScrollButtons) {
         m_scrollLeftRect = { clientRect.right - m_scrollButtonWidth * 2, 0, clientRect.right - m_scrollButtonWidth, m_scrollButtonHeight };
         m_scrollRightRect = { clientRect.right - m_scrollButtonWidth, 0, clientRect.right, m_scrollButtonHeight };
-        HBRUSH hScrollBrush = CreateSolidBrush(m_isScrollLeftHovered ? RGB(60, 60, 60) : m_clrBg);
+        HBRUSH hScrollBrush = CreateSolidBrush(m_isScrollLeftHovered ? m_clrScrollButtonHoverBg : m_clrBg);
         FillRect(hdcMem, &m_scrollLeftRect, hScrollBrush);
         DeleteObject(hScrollBrush);
         POINT triangleLeft[] = { {m_scrollLeftRect.left + MulDiv(10, m_dpi, 96), m_scrollLeftRect.top + MulDiv(15, m_dpi, 96)},{m_scrollLeftRect.left + MulDiv(15, m_dpi, 96), m_scrollLeftRect.top + MulDiv(10, m_dpi, 96)},{m_scrollLeftRect.left + MulDiv(15, m_dpi, 96), m_scrollLeftRect.top + MulDiv(20, m_dpi, 96)} };
@@ -447,7 +480,7 @@ void CustomTabControl::OnPaint(HWND hWnd) {
         SelectObject(hdcMem, hTriangleBrush);
         Polygon(hdcMem, triangleLeft, 3);
         DeleteObject(hTriangleBrush);
-        hScrollBrush = CreateSolidBrush(m_isScrollRightHovered ? RGB(60, 60, 60) : m_clrBg);
+        hScrollBrush = CreateSolidBrush(m_isScrollRightHovered ? m_clrScrollButtonHoverBg : m_clrBg);
         FillRect(hdcMem, &m_scrollRightRect, hScrollBrush);
         DeleteObject(hScrollBrush);
         POINT triangleRight[] = { {m_scrollRightRect.left + MulDiv(15, m_dpi, 96), m_scrollRightRect.top + MulDiv(20, m_dpi, 96)},{m_scrollRightRect.left + MulDiv(20, m_dpi, 96), m_scrollRightRect.top + MulDiv(15, m_dpi, 96)},{m_scrollRightRect.left + MulDiv(15, m_dpi, 96), m_scrollRightRect.top + MulDiv(10, m_dpi, 96)} };
@@ -470,7 +503,7 @@ void CustomTabControl::DrawTab(HDC hdc, int index, const RECT& rect, bool isActi
     RECT rc = rect;
     COLORREF bgColor = isActive ? m_clrActiveTab : m_clrBg;
     if (isHovered && !isActive) {
-        bgColor = RGB(45, 45, 45);
+        bgColor = m_clrHoverBg;
     }
 
     HBRUSH hBrush = CreateSolidBrush(bgColor);
@@ -516,14 +549,16 @@ void CustomTabControl::DrawTab(HDC hdc, int index, const RECT& rect, bool isActi
     RECT rcCloseRect = { closeBtnX, rect.top, rect.right, rect.bottom };
 
     bool isPressed = ((int)index == m_pressedCloseButtonTab);
-    HBRUSH hCloseBrush = (isCloseHovered || isPressed) ? CreateSolidBrush(RGB(96, 96, 96)) : (HBRUSH)GetStockObject(NULL_BRUSH);
+    // ホバー時にm_clrCloseButtonHoverBgを使用
+    HBRUSH hCloseBrush = (isCloseHovered || isPressed) ? CreateSolidBrush(m_clrCloseButtonHoverBg) : (HBRUSH)GetStockObject(NULL_BRUSH);
+
     if (isCloseHovered || isPressed) {
         FillRect(hdc, &rcCloseRect, hCloseBrush);
     }
     DeleteObject(hCloseBrush);
 
     COLORREF oldTextColor = SetTextColor(hdc, (isCloseHovered || isPressed) ? RGB(255, 255, 255) : m_clrCloseText);
-    HPEN hClosePen = CreatePen(PS_SOLID, 1, (isCloseHovered || isPressed) ? RGB(255, 255, 255) : m_clrCloseText);
+    HPEN hClosePen = CreatePen(PS_SOLID, 1, (isCloseHovered || isPressed) ? m_clrText : m_clrCloseText); // ★ 修正: ホバー時のX印の色をm_clrTextに
     HPEN hOldClosePen = (HPEN)SelectObject(hdc, hClosePen);
 
     int crossPadding = MulDiv(8, m_dpi, 96);
@@ -544,7 +579,7 @@ void CustomTabControl::OnSize(HWND hWnd) {
     GetClientRect(hWnd, &rcClient);
     int tabHeight = MulDiv(FONT_SIZE, m_dpi, 72) + MulDiv(TAB_PADDING_Y * 2, m_dpi, 96);
     SetWindowPos(hWnd, NULL, 0, 0, rcClient.right, tabHeight, SWP_NOZORDER);
-    InvalidateRect(hWnd, NULL, TRUE);
+    RecalculateTabPositions();
 }
 
 void CustomTabControl::OnLButtonDown(HWND hWnd, int x, int y) {
@@ -552,6 +587,8 @@ void CustomTabControl::OnLButtonDown(HWND hWnd, int x, int y) {
     bool isScrollLeft = false;
     bool isScrollRight = false;
     int index = HitTest(x, y, &isClose, &isScrollLeft, &isScrollRight);
+
+    HideCustomTooltip();
 
     if (isScrollLeft) {
         m_scrollOffset = max(0, m_scrollOffset - 50);
@@ -596,26 +633,21 @@ void CustomTabControl::OnMouseMove(HWND hWnd, int x, int y) {
     bool isScrollRight = false;
     int newHoveredTab = HitTest(x, y, &isClose, &isScrollLeft, &isScrollRight);
 
-    if (isScrollLeft != m_isScrollLeftHovered || isScrollRight != m_isScrollRightHovered) {
-        m_isScrollLeftHovered = isScrollLeft;
-        m_isScrollRightHovered = isScrollRight;
-        InvalidateRect(hWnd, NULL, FALSE);
-    }
+    // 新しいホバー状態を直接設定
+    int oldHoveredTab = m_hoveredTab;
+    int oldHoveredCloseButtonTab = m_hoveredCloseButtonTab;
 
     if (m_isDragging) {
         isClose = false;
-        m_hoveredTab = newHoveredTab;
     }
-    else {
-        if (newHoveredTab != m_hoveredTab) {
-            m_hoveredTab = newHoveredTab;
-        }
-    }
+    m_hoveredTab = newHoveredTab;
 
-    int newHoveredCloseButtonTab = isClose ? m_hoveredTab : -1;
+    m_hoveredCloseButtonTab = isClose ? m_hoveredTab : -1;
 
-    if (newHoveredCloseButtonTab != m_hoveredCloseButtonTab) {
-        m_hoveredCloseButtonTab = newHoveredCloseButtonTab;
+    // ホバー状態が変化した場合のみ再描画
+    if (oldHoveredTab != m_hoveredTab || oldHoveredCloseButtonTab != m_hoveredCloseButtonTab || isScrollLeft != m_isScrollLeftHovered || isScrollRight != m_isScrollRightHovered) {
+        m_isScrollLeftHovered = isScrollLeft;
+        m_isScrollRightHovered = isScrollRight;
         InvalidateRect(hWnd, NULL, FALSE);
     }
 
@@ -660,10 +692,10 @@ void CustomTabControl::OnMouseHover(HWND hWnd, int x, int y) {
     int index = HitTest(x, y, &isClose, &isScrollLeft, &isScrollRight);
 
     if (index != -1 && !isClose && !m_isDragging) {
-        ShowTooltip(index, x, y);
+        ShowCustomTooltip(index, x, y);
     }
     else {
-        SendMessage(m_hTooltipWnd, TTM_TRACKACTIVATE, FALSE, NULL);
+        HideCustomTooltip();
     }
 }
 
@@ -679,26 +711,25 @@ void CustomTabControl::OnLButtonUp(HWND hWnd, int x, int y) {
         bool isScrollLeft = false;
         bool isScrollRight = false;
         int dropIndex = -1;
-
         RECT rcClient;
         GetClientRect(hWnd, &rcClient);
-
         int totalTabsWidth = 0;
         for (size_t i = 0; i < m_tabTitles.size(); ++i) {
             totalTabsWidth += GetTabWidth(i);
         }
-
         if (m_hoveredTab == -1 && x > totalTabsWidth - m_scrollOffset) {
             dropIndex = (int)m_tabTitles.size() - 1;
         }
         else {
             dropIndex = HitTest(x, y, &isClose, &isScrollLeft, &isScrollRight);
         }
-
-        if (dropIndex != -1 && dropIndex != m_draggedTabIndex) {
+        if (dropIndex == -1) {
+            dropIndex = m_draggedTabIndex;
+        }
+        if (dropIndex != m_draggedTabIndex) {
             SwitchTabOrder(m_draggedTabIndex, dropIndex);
         }
-
+        SetCurSel(dropIndex);
         RecalculateTabPositions();
     }
     else if (m_pressedCloseButtonTab != -1) {
@@ -724,7 +755,7 @@ void CustomTabControl::OnMouseLeave(HWND hWnd) {
         m_hoveredCloseButtonTab = -1;
         m_isScrollLeftHovered = false;
         m_isScrollRightHovered = false;
-        SendMessage(m_hTooltipWnd, TTM_TRACKACTIVATE, FALSE, NULL);
+        HideCustomTooltip();
         InvalidateRect(hWnd, NULL, FALSE);
     }
 }
@@ -788,7 +819,7 @@ void CustomTabControl::CreateDragWindow(int tabIndex) {
         NULL, NULL, GetModuleHandle(NULL), this
     );
 
-	ShowWindow(m_hDragWnd, SW_SHOWNOACTIVATE);
+    ShowWindow(m_hDragWnd, SW_SHOWNOACTIVATE);
 
     if (m_hDragWnd) {
         BLENDFUNCTION blend = { 0 };
@@ -875,38 +906,73 @@ void CustomTabControl::DrawDragWindow(HDC hdc) {
     DeleteObject(hClosePen);
 }
 
-void CustomTabControl::ShowTooltip(int index, int x, int y) {
-    if (m_hTooltipWnd && index >= 0 && index < m_tabTitles.size()) {
-        TOOLINFO toolInfo = { 0 };
-        toolInfo.cbSize = sizeof(toolInfo);
-        toolInfo.uFlags = TTF_TRACK | TTF_ABSOLUTE;
-        toolInfo.uId = (UINT_PTR)index;
-        toolInfo.hwnd = m_hWnd;
+void CustomTabControl::ShowCustomTooltip(int index, int x, int y) {
+    if (!m_hPopupWnd || index < 0 || index >= (int)m_tabTitles.size()) {
+        return;
+    }
 
-        // ツールチップの内容がすでに同じかどうかをチェックする
-        TCHAR existingText[256];
-        toolInfo.lpszText = existingText;
-        bool toolNeedsUpdate = true;
-        if (SendMessage(m_hTooltipWnd, TTM_GETTEXTW, (WPARAM)sizeof(existingText), (LPARAM)&toolInfo)) {
-            if (std::wstring(existingText) == m_tabTitles[index]) {
-                toolNeedsUpdate = false;
-            }
-        }
+    m_popupText = m_tabTitles[index];
 
-        if (toolNeedsUpdate) {
-            // 更新が必要な場合は、lpszTextを正しい文字列に戻して更新
-            toolInfo.lpszText = (LPWSTR)m_tabTitles[index].c_str();
-            SendMessage(m_hTooltipWnd, TTM_UPDATETIPTEXTW, 0, (LPARAM)&toolInfo);
-        }
+    // テキストサイズを計算
+    HDC hdc = GetDC(m_hPopupWnd);
+    SelectObject(hdc, m_hFont);
+    SIZE size;
+    GetTextExtentPoint32W(hdc, m_popupText.c_str(), (int)m_popupText.length(), &size);
+    ReleaseDC(m_hPopupWnd, hdc);
 
-        // **これが一番重要な修正です**
-        // 最後に有効な文字列へのポインタを確実に設定してからアクティベートする
-        toolInfo.lpszText = (LPWSTR)m_tabTitles[index].c_str();
+    m_popupWidth = size.cx + 20; // 左右に10ピクセルのパディング
+    m_popupHeight = size.cy + 10; // 上下に5ピクセルのパディング
 
-        POINT pt = { x, y };
-        ClientToScreen(m_hWnd, &pt);
+    // ポップアップ位置を計算（クライアント座標からスクリーン座標へ）
+    POINT pt = { x, y };
+    ClientToScreen(m_hWnd, &pt);
 
-        SendMessage(m_hTooltipWnd, TTM_TRACKPOSITION, 0, MAKELPARAM(pt.x + 10, pt.y + 20));
-        SendMessage(m_hTooltipWnd, TTM_TRACKACTIVATE, TRUE, (LPARAM)&toolInfo);
+    // ポップアップウィンドウの表示と位置設定
+    SetWindowPos(m_hPopupWnd, HWND_TOPMOST,
+        pt.x + 10, pt.y + 20, m_popupWidth, m_popupHeight,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+    m_isPopupVisible = true;
+
+    // 再描画を強制
+    InvalidateRect(m_hPopupWnd, NULL, TRUE);
+}
+
+void CustomTabControl::HideCustomTooltip() {
+    if (m_hPopupWnd && m_isPopupVisible) {
+        ShowWindow(m_hPopupWnd, SW_HIDE);
+        m_isPopupVisible = false;
+    }
+}
+
+// テーマの変更に応じて色を更新する関数
+void CustomTabControl::UpdateTheme(BOOL bIsDarkMode) {
+    if (bIsDarkMode) {
+        m_clrBg = RGB(32, 32, 32);
+        m_clrText = RGB(220, 220, 220);
+        m_clrActiveTab = RGB(50, 50, 50);
+        m_clrSeparator = RGB(60, 60, 60);
+        m_clrCloseText = RGB(150, 150, 150);
+        m_clrHoverBg = RGB(45, 45, 45);
+        m_clrCloseButtonHoverBg = RGB(96, 96, 96);
+        m_clrScrollButtonHoverBg = RGB(60, 60, 60);
+        m_clrTooltipBg = RGB(50, 50, 50);
+        m_clrTooltipText = RGB(255, 255, 255);
+    }
+    else {
+        m_clrBg = RGB(220, 220, 220);
+        m_clrText = RGB(32, 32, 32);
+        m_clrActiveTab = RGB(240, 240, 240);
+        m_clrSeparator = RGB(200, 200, 200);
+        m_clrCloseText = RGB(100, 100, 100);
+        m_clrHoverBg = RGB(230, 230, 230);
+        m_clrCloseButtonHoverBg = RGB(200, 200, 200);
+        m_clrScrollButtonHoverBg = RGB(220, 220, 220);
+        m_clrTooltipBg = RGB(250, 250, 250);
+        m_clrTooltipText = RGB(32, 32, 32);
+    }
+    InvalidateRect(m_hWnd, NULL, TRUE);
+    if (m_hPopupWnd) {
+        InvalidateRect(m_hPopupWnd, NULL, TRUE);
     }
 }
